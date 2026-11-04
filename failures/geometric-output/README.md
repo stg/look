@@ -16,7 +16,7 @@ command and verified result. Reproduction does not mean a geometry fix has lande
 | 03 `1ed619a3e4ca` | [Actual bounded face](actual-faces/case-03.stepdata): the two original circular boundaries differ in axial position by only 0.254 source units, yet Look renders a tall cone. | Verified: compiled mesh axial bounds reach 20.1829 instead of the source bound 2.9271. |
 | 04 `2a37b8bdb6e5` | [Actual B-spline edge](actual-edges/case-04.stepdata) and [two-face loss reproduction](actual-faces/case-04.stepdata): endpoint residual 0.0001257; 14 of 77 faces lost. | The [two-face streak fixture](actual-faces/case-04-streak.stepdata) also reproduces the fan; numerical per-knot-span search finds a minimum endpoint distance of 0.00012566 mm, exceeding the stated 0.000005 mm uncertainty. |
 | 05 `2af42211d657` | [Actual B-spline edge](actual-edges/case-05.stepdata) and [two-face loss reproduction](actual-faces/case-05.stepdata): endpoint residual 0.01536; 2 of 38 faces lost. | A numerical per-knot-span search finds the endpoint within 3.7e-11 mm of the source curve (declared uncertainty 1e-7 mm), while Look compares the untrimmed spline end at parameter 1.0 (0.01536 mm away); the actual vertex is at parameter 0.98034. A separate [two-face streak fixture](actual-faces/case-05-streak.stepdata) reproduces the visible fan. |
-| 06 `2ad4d391cea6` | [Actual circle edge](actual-edges/case-06.stepdata) and [two-face loss reproduction](actual-faces/case-06.stepdata): endpoint residual 0.00005012; source declares 0.001 inch closure uncertainty. Four of 572 faces lost. | The same edge also removes a [large planar face](actual-faces/case-06-plane.stepdata). A [vertex-projected control](actual-faces/case-06-control.stepdata) restores the smaller face; reduced face restoration and its localized full-thumbnail change are verified; any additional reported symptom is unconfirmed. |
+| 06 `2ad4d391cea6` | The user-identified bottom face exists in the source as #7209; [its one-face reproduction](actual-faces/case-06-clarified.stepdata) preserves the original inch and closure-uncertainty context. The [actual edge](actual-edges/case-06.stepdata) is 0.00005012 inch from its source vertices, within the declared 0.001-inch tolerance. | Verified: Look refuses #7209 and drops the face. The user-supplied isolated export matches all 102 vertices and 104 edge connections after inch-to-mm conversion. |
 | 07 `2b9801cc8acd` | [Actual hyperbola edge](actual-edges/case-07.stepdata) and [two-face loss reproduction](actual-faces/case-07.stepdata): endpoint residual 0.0008598; 9 of 130 faces lost. | Two-face loss verified; numerical nearest-point search gives approximately 0.00060485 mm against 0.00002 mm declared uncertainty. A [vertex-projected control](actual-faces/case-07-control.stepdata) restores the face; reduced face restoration and its localized full-thumbnail change are verified; any additional reported symptom is unconfirmed. |
 | 08 `2dd8b827c073` | [Two actual faces](actual-faces/case-08.stepdata), a cylinder and torus, reproduce the visible fan; each rendered alone lacks the same fan. | Reduced visual reproduction verified; CPU mesh contains triangles far from either analytic surface. The tolerance violation is verified; the detailed mesher mechanism is deferred. |
 | 09 `2e2afd7c6836` | [Two actual faces](actual-faces/case-09.stepdata), a cylinder and torus, reproduce the visible fan; each rendered alone lacks the same fan. | Reduced visual reproduction verified; CPU mesh contains triangles far from either analytic surface. The tolerance violation is verified; the detailed mesher mechanism is deferred. |
@@ -25,14 +25,31 @@ command and verified result. Reproduction does not mean a geometry fix has lande
 
 For cases 01 and 02, the `front()`/`back()` endpoint check uses the first and last full knot values, whereas the degree-13 rational spline is defined over its narrower interior support. The numerical check verifies that the support endpoints match the declared closed-edge vertex. For case 05, the source endpoint lies in the interior of the bounded spline, but conversion checks the untrimmed full spline.
 
+For case 06, the user supplied an isolated example of the missing bottom face.
+It matches source face #7209: all 102 vertices agree after scaling inches by
+25.4, all 104 undirected edge connections match, and both have seven loops of
+lengths 2, 2, 4, 4, 4, 4 and 84. The source original therefore contains the
+face; Look reports `EdgeCurveConversionFailed` and omits it. The user-supplied
+export imports as 1,602 triangles; its boundary representation was rewritten
+from lines and circles into splines, and its source units also changed. Its
+single-sided surface is visible from the rear; its default isolated iso view is transparent because
+it faces away. The supplied export and comparison evidence remain private.
+
+Run the exact original one-face reduction and verify its units and loss:
+
+```powershell
+python failures/geometric-output/actual-faces/clarified.py --look-exe PATH_TO_LOOK.exe
+```
+
 The full-model diagnostic controls for cases 06 and 07 project only the same
 vertices used in the reduced controls. Their loss counts decrease from 4 to 3
 and from 9 to 8 respectively, with no new lost face IDs, but the resulting
 thumbnail changes are localized: case 06 changes 113 pixels in the contact
 area (x=243-267, y=265-286), and case 07 changes 163 pixels near the
 body/lead notch (x=300-321, y=302-328), on 512 x 512 images. These changes
-confirm the visual effect of the reduced losses; they do not establish whether
-the user intended an additional symptom. The byte-identical original capture,
+confirm the visual effect of the reduced losses. The user has now identified
+case 06 as the missing bottom face; any additional case 07 symptom remains
+unconfirmed. The byte-identical original capture,
 projected full-source control, rendered control and result logs remain in the
 ignored local `failures/private/cases/case-06/` and `case-07/` directories.
 The separate case 06 plane fixture verifies the large face #7209 is also lost.
