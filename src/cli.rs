@@ -135,6 +135,20 @@ pub struct RenderArgs {
 
     #[arg(long)]
     pub antialias: bool,
+    /// Screen-space ambient occlusion on the GPU (StepThumbnail build).
+    #[arg(long)]
+    pub ambient_occlusion: bool,
+    #[arg(long, default_value_t = 1.0)]
+    pub ao_strength: f32,
+    #[arg(long, default_value_t = 14.0)]
+    pub ao_radius: f32,
+    /// GPU silhouette and crease outlines (StepThumbnail build).
+    #[arg(long)]
+    pub edges: bool,
+    #[arg(long, default_value_t = 0.75)]
+    pub edge_strength: f32,
+    #[arg(long, default_value_t = 1.0)]
+    pub edge_width: f32,
 
     /// Pack all requested views into one PNG; optionally specify columns.
     #[arg(long, num_args = 0..=1, default_missing_value = "0")]
@@ -314,6 +328,12 @@ pub fn execute_render(args: RenderArgs) -> anyhow::Result<()> {
         base_color: args.base_color,
         material_mode,
         antialias: args.antialias,
+        ambient_occlusion: args.ambient_occlusion,
+        ao_strength: args.ao_strength,
+        ao_radius: args.ao_radius,
+        edges: args.edges,
+        edge_strength: args.edge_strength,
+        edge_width: args.edge_width,
         atlas_columns: args.atlas.map(|columns| {
             if columns == 0 {
                 (args.views.len() as f32).sqrt().ceil() as u32

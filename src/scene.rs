@@ -295,7 +295,27 @@ pub fn compile_scene_for_render(
     material_mode: MaterialMode,
     timings: &mut Timings,
 ) -> anyhow::Result<CompiledScene> {
-    match extension(path).as_str() {
+    compile_scene_for_render_with_control(
+        path,
+        up_axis,
+        material_mode,
+        timings,
+        &Default::default(),
+    )
+}
+
+/// Import with cooperative cancellation and a time budget. Checks surround
+/// parser calls and independent STEP shell operations; a single kernel call
+/// already running cannot be forcibly interrupted.
+pub fn compile_scene_for_render_with_control(
+    path: &Path,
+    up_axis: UpAxis,
+    material_mode: MaterialMode,
+    timings: &mut Timings,
+    control: &crate::import_control::ImportControl,
+) -> anyhow::Result<CompiledScene> {
+    control.check()?;
+    let result = match extension(path).as_str() {
         "glb" => compile_glb_for_render(path, up_axis, material_mode, timings),
         "stl" => compile_stl(
             path,
@@ -303,14 +323,17 @@ pub fn compile_scene_for_render(
             material_mode == MaterialMode::Source,
             timings,
         ),
-        "step" | "stp" => compile_step(
+        "step" | "stp" => compile_step_with_control(
             path,
             up_axis,
             material_mode == MaterialMode::Source,
             timings,
+            control,
         ),
         other => bail!("unsupported scene extension '{other}'; expected GLB, STL, or STEP"),
-    }
+    };
+    control.check()?;
+    result
 }
 
 fn extension(path: &Path) -> String {
@@ -359,6 +382,23 @@ fn compile_step(
     include_source_materials: bool,
     timings: &mut Timings,
 ) -> anyhow::Result<CompiledScene> {
+    compile_step_with_control(
+        path,
+        up_axis,
+        include_source_materials,
+        timings,
+        &Default::default(),
+    )
+}
+
+fn compile_step_with_control(
+    path: &Path,
+    up_axis: UpAxis,
+    include_source_materials: bool,
+    timings: &mut Timings,
+    control: &crate::import_control::ImportControl,
+) -> anyhow::Result<CompiledScene> {
+    control.check()?;
     let bytes = timings.measure("read", || {
         fs::read(path).with_context(|| format!("failed to read scene '{}'", path.display()))
     })?;
@@ -371,9 +411,11 @@ fn compile_step(
     truck_meshalgo::tessellation::diagnosis::set_document_context(Some(
         path.to_string_lossy().into_owned(),
     ));
-    let scene = crate::step::parse_step_scene(&bytes, timings)
+    control.check()?;
+    let scene = crate::step::parse_step_scene_with_control(&bytes, timings, control)
         .with_context(|| format!("failed to load STEP scene '{}'", path.display()))?;
     timings.record("parse", parse_started.elapsed());
+    control.check()?;
 
     match scene {
         crate::step::StepScene::Flat((positions, indices, colors)) => compile_step_flat(
@@ -525,7 +567,7 @@ fn compile_step_assembly(
         source_hash,
         geometries,
         instances,
-        materials: vec![default_source_material()],
+        materials: vec![cad_source_material()],
         textures: Vec::new(),
         bounds,
         fit_radius,
@@ -619,7 +661,7 @@ fn compile_triangle_mesh(
         source_hash,
         geometries: vec![geometry],
         instances: vec![instance],
-        materials: vec![default_source_material()],
+        materials: vec![cad_source_material()],
         textures: Vec::new(),
         bounds,
         fit_radius,
@@ -1216,6 +1258,15 @@ fn compile_material(material: gltf::Material<'_>) -> anyhow::Result<SourceMateri
         alpha_cutoff: material.alpha_cutoff().unwrap_or(0.5),
         double_sided: material.double_sided(),
     })
+}
+
+// STEP and STL do not declare glTF's metallic PBR default. Treat their
+// source-coloured surfaces as dielectric so directional light reveals form.
+fn cad_source_material() -> SourceMaterial {
+    let mut material = default_source_material();
+    material.metallic_factor = 0.0;
+    material.roughness_factor = 0.6;
+    material
 }
 
 fn default_source_material() -> SourceMaterial {

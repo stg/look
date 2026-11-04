@@ -34,6 +34,7 @@ fn renders_generated_glb_to_png() {
         material_mode: MaterialMode::Technical,
         antialias: false,
         atlas_columns: None,
+        ..RenderConfig::default()
     };
     let view = ViewConfig::named(NamedView::Front, CameraKind::Orthographic);
     let camera = prepare_camera(&view, &scene.bounds, render.resolution);
@@ -99,6 +100,60 @@ fn renders_generated_glb_to_png() {
             .collect::<Vec<_>>(),
         vec![(0, 0), (128, 0), (0, 128), (128, 128)]
     );
+}
+
+#[test]
+#[ignore = "requires a native GPU"]
+fn effects_preserve_transparent_single_views_and_atlases() {
+    let artifact_dir = tempfile::tempdir().unwrap();
+    let model = artifact_dir.path().join("triangle.glb");
+    fs::write(&model, triangle_glb()).unwrap();
+    let scene = compile_glb(&model, UpAxis::Y, &mut Timings::default()).unwrap();
+    let mut renderer = WgpuRenderer::new().unwrap();
+    for antialias in [false, true] {
+        let config = RenderConfig {
+            resolution: [128, 128],
+            background: "#ffffff00".into(),
+            ambient_occlusion: true,
+            edges: true,
+            antialias,
+            ..Default::default()
+        };
+        let camera = prepare_camera(
+            &ViewConfig::named(NamedView::Front, CameraKind::Orthographic),
+            &scene.bounds,
+            config.resolution,
+        );
+        for atlas in [false, true] {
+            let cameras = if atlas {
+                vec![camera.clone(), camera.clone()]
+            } else {
+                vec![camera.clone()]
+            };
+            let render = RenderConfig {
+                atlas_columns: atlas.then_some(2),
+                ..config.clone()
+            };
+            let batch = renderer
+                .render_views(&scene, &cameras, &render, &LightingConfig::default())
+                .unwrap();
+            let image = &batch.images[0];
+            assert_eq!(
+                [image.width, image.height],
+                [if atlas { 256 } else { 128 }, 128]
+            );
+            assert!(image.rgba.chunks_exact(4).any(|pixel| pixel[3] == 0));
+            assert!(image.rgba.chunks_exact(4).any(|pixel| pixel[3] == 255));
+            if antialias {
+                assert!(
+                    image
+                        .rgba
+                        .chunks_exact(4)
+                        .any(|pixel| pixel[3] > 0 && pixel[3] < 255)
+                );
+            }
+        }
+    }
 }
 
 #[test]

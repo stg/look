@@ -1,5 +1,11 @@
 # look
 
+This branch contains the renderer changes used by StepThumbs: GPU ambient
+occlusion, crease/silhouette edges, transparent PNG output, CAD material shading,
+bounded GPU waits and cooperative import controls. It retains Look's upstream
+MIT OR Apache-2.0 licensing. The original project is
+[stefangolas/look](https://github.com/stefangolas/look); the upstream README follows.
+
 `look` is two things in one native binary.
 
 **A renderer.** GLB, STL, and STEP models become PNG images and an interactive

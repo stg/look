@@ -128,6 +128,18 @@ pub struct RenderConfig {
     pub material_mode: MaterialMode,
     #[serde(default)]
     pub antialias: bool,
+    #[serde(default)]
+    pub ambient_occlusion: bool,
+    #[serde(default = "default_ao_strength")]
+    pub ao_strength: f32,
+    #[serde(default = "default_ao_radius")]
+    pub ao_radius: f32,
+    #[serde(default)]
+    pub edges: bool,
+    #[serde(default = "default_edge_strength")]
+    pub edge_strength: f32,
+    #[serde(default = "default_edge_width")]
+    pub edge_width: f32,
     /// When set, pack all views into one GPU-rendered PNG atlas using this
     /// many tile columns. Resolution remains the per-view tile size.
     #[serde(default)]
@@ -142,6 +154,12 @@ impl Default for RenderConfig {
             base_color: default_base_color(),
             material_mode: default_material_mode(),
             antialias: false,
+            ambient_occlusion: false,
+            ao_strength: default_ao_strength(),
+            ao_radius: default_ao_radius(),
+            edges: false,
+            edge_strength: default_edge_strength(),
+            edge_width: default_edge_width(),
             atlas_columns: None,
         }
     }
@@ -291,6 +309,20 @@ impl NormalizedConfig {
         parse_hex_color(&self.render.background)?;
         parse_hex_color(&self.render.base_color)?;
         parse_hex_color(&self.lighting.color)?;
+        if !self.render.ao_strength.is_finite()
+            || !(0.0..=3.0).contains(&self.render.ao_strength)
+            || !self.render.ao_radius.is_finite()
+            || !(1.0..=100.0).contains(&self.render.ao_radius)
+        {
+            bail!("AO strength must be 0..3 and radius must be 1..100 pixels");
+        }
+        if !self.render.edge_strength.is_finite()
+            || !(0.0..=1.0).contains(&self.render.edge_strength)
+            || !self.render.edge_width.is_finite()
+            || !(1.0..=3.0).contains(&self.render.edge_width)
+        {
+            bail!("Edge strength must be 0..1 and width 1..3 pixels");
+        }
         Ok(())
     }
 }
@@ -325,14 +357,32 @@ pub fn parse_vec3(value: &str) -> Result<[f32; 3], String> {
 
 pub fn parse_hex_color(value: &str) -> anyhow::Result<[f32; 4]> {
     let value = value.strip_prefix('#').unwrap_or(value);
-    if value.len() != 6 {
-        bail!("color must use #RRGGBB format");
+    if value.len() != 6 && value.len() != 8 {
+        bail!("color must use #RRGGBB or #RRGGBBAA format");
     }
     let channel = |range| -> anyhow::Result<f32> {
         let byte = u8::from_str_radix(&value[range], 16).context("invalid hexadecimal color")?;
         Ok(srgb_to_linear(f32::from(byte) / 255.0))
     };
-    Ok([channel(0..2)?, channel(2..4)?, channel(4..6)?, 1.0])
+    let alpha = if value.len() == 8 {
+        f32::from(u8::from_str_radix(&value[6..8], 16).context("invalid alpha")?) / 255.0
+    } else {
+        1.0
+    };
+    Ok([channel(0..2)?, channel(2..4)?, channel(4..6)?, alpha])
+}
+
+fn default_ao_strength() -> f32 {
+    1.0
+}
+fn default_ao_radius() -> f32 {
+    14.0
+}
+fn default_edge_strength() -> f32 {
+    0.75
+}
+fn default_edge_width() -> f32 {
+    1.0
 }
 
 fn srgb_to_linear(value: f32) -> f32 {
@@ -411,5 +461,7 @@ mod tests {
         let black = parse_hex_color("#000000").unwrap();
         assert_eq!(white, [1.0, 1.0, 1.0, 1.0]);
         assert_eq!(black, [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(parse_hex_color("#00000000").unwrap(), [0.0; 4]);
+        assert!((parse_hex_color("#ffffff80").unwrap()[3] - 128.0 / 255.0).abs() < 0.00001);
     }
 }

@@ -1,3 +1,4 @@
+mod ssao;
 mod wgpu_renderer;
 
 use serde::Serialize;

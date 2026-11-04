@@ -2,6 +2,7 @@ pub mod cache;
 pub mod camera;
 pub mod cli;
 pub mod config;
+pub mod import_control;
 pub mod ocrt;
 pub mod output;
 pub mod perf;

@@ -3,7 +3,7 @@ use std::{
     mem,
     ops::Range,
     sync::{Arc, Mutex, mpsc},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::Context;
@@ -161,6 +161,8 @@ struct ViewResources {
 }
 
 pub struct WgpuRenderer {
+    ao_single: Option<super::ssao::Ssao>,
+    ao_multisample: Option<super::ssao::Ssao>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     fingerprint: HardwareFingerprint,
@@ -279,6 +281,8 @@ impl WgpuRenderer {
         timings.record("gpu_layout", pipeline_started.elapsed());
 
         Ok(Self {
+            ao_single: None,
+            ao_multisample: None,
             device,
             queue,
             fingerprint,
@@ -919,10 +923,10 @@ impl WgpuRenderer {
                     resolve_target: multisample_view.as_ref().map(|_| &output_view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: f64::from(background[0]),
-                            g: f64::from(background[1]),
-                            b: f64::from(background[2]),
-                            a: 1.0,
+                            r: f64::from(background[0] * background[3]),
+                            g: f64::from(background[1] * background[3]),
+                            b: f64::from(background[2] * background[3]),
+                            a: f64::from(background[3]),
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -931,7 +935,11 @@ impl WgpuRenderer {
                     view: &depth_view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
+                        store: if render.ambient_occlusion || render.edges {
+                            wgpu::StoreOp::Store
+                        } else {
+                            wgpu::StoreOp::Discard
+                        },
                     }),
                     stencil_ops: None,
                 }),
@@ -977,8 +985,25 @@ impl WgpuRenderer {
                 pass.set_scissor_rect(0, 0, width, height);
             }
         }
+        let occluded = (render.ambient_occlusion || render.edges).then(|| {
+            let effect = if sample_count > 1 {
+                self.ao_multisample.as_ref()
+            } else {
+                self.ao_single.as_ref()
+            }
+            .expect("AO pipeline initialized");
+            effect.apply(
+                &self.device,
+                &mut encoder,
+                &output_texture,
+                &depth_view,
+                cameras,
+                render,
+                columns,
+            )
+        });
         encoder.copy_texture_to_buffer(
-            output_texture.as_image_copy(),
+            occluded.as_ref().unwrap_or(&output_texture).as_image_copy(),
             wgpu::TexelCopyBufferInfo {
                 buffer: &readback,
                 layout: wgpu::TexelCopyBufferLayout {
@@ -1021,15 +1046,18 @@ impl WgpuRenderer {
             receiver
         });
         self.device
-            .poll(wgpu::PollType::wait_indefinitely())
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(Duration::from_secs(30)),
+            })
             .context("GPU atlas polling failed")?;
         receiver
-            .recv()
+            .recv_timeout(Duration::from_secs(5))
             .context("GPU atlas readback callback was dropped")?
             .context("GPU atlas readback mapping failed")?;
         if let Some(receiver) = timestamp_receiver {
             receiver
-                .recv()
+                .recv_timeout(Duration::from_secs(5))
                 .context("GPU atlas timestamp callback was dropped")?
                 .context("GPU atlas timestamp mapping failed")?;
         }
@@ -1047,6 +1075,9 @@ impl WgpuRenderer {
         }
         drop(mapped);
         readback.unmap();
+        if background[3] < 1.0 {
+            straight_alpha_png(&mut rgba);
+        }
         if let Some(timestamp_readback) = timestamp_readback {
             let mapped = timestamp_readback
                 .slice(..)
@@ -1230,6 +1261,16 @@ impl Renderer for WgpuRenderer {
         let height = render.resolution[1];
         let sample_count = if render.antialias { 4 } else { 1 };
         self.ensure_pipeline(render.material_mode, sample_count, &mut timings);
+        if render.ambient_occlusion || render.edges {
+            let slot = if sample_count > 1 {
+                &mut self.ao_multisample
+            } else {
+                &mut self.ao_single
+            };
+            if slot.is_none() {
+                *slot = Some(super::ssao::Ssao::new(&self.device, sample_count));
+            }
+        }
 
         let cache_started = Instant::now();
         let cached_scene = self
@@ -1425,10 +1466,10 @@ impl Renderer for WgpuRenderer {
                             .map(|_| &resource.output_view),
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: f64::from(background[0]),
-                                g: f64::from(background[1]),
-                                b: f64::from(background[2]),
-                                a: 1.0,
+                                r: f64::from(background[0] * background[3]),
+                                g: f64::from(background[1] * background[3]),
+                                b: f64::from(background[2] * background[3]),
+                                a: f64::from(background[3]),
                             }),
                             store: wgpu::StoreOp::Store,
                         },
@@ -1437,7 +1478,11 @@ impl Renderer for WgpuRenderer {
                         view: &resource.depth_view,
                         depth_ops: Some(wgpu::Operations {
                             load: wgpu::LoadOp::Clear(1.0),
-                            store: wgpu::StoreOp::Discard,
+                            store: if render.ambient_occlusion || render.edges {
+                                wgpu::StoreOp::Store
+                            } else {
+                                wgpu::StoreOp::Discard
+                            },
                         }),
                         stencil_ops: None,
                     }),
@@ -1485,8 +1530,28 @@ impl Renderer for WgpuRenderer {
                     }
                 }
             }
+            let occluded = (render.ambient_occlusion || render.edges).then(|| {
+                let effect = if sample_count > 1 {
+                    self.ao_multisample.as_ref()
+                } else {
+                    self.ao_single.as_ref()
+                }
+                .expect("AO pipeline initialized");
+                effect.apply(
+                    &self.device,
+                    &mut encoder,
+                    &resource.output_texture,
+                    &resource.depth_view,
+                    &cameras[resource_index..resource_index + 1],
+                    render,
+                    1,
+                )
+            });
             encoder.copy_texture_to_buffer(
-                resource.output_texture.as_image_copy(),
+                occluded
+                    .as_ref()
+                    .unwrap_or(&resource.output_texture)
+                    .as_image_copy(),
                 wgpu::TexelCopyBufferInfo {
                     buffer: &resource.readback,
                     layout: wgpu::TexelCopyBufferLayout {
@@ -1535,17 +1600,20 @@ impl Renderer for WgpuRenderer {
             receiver
         });
         self.device
-            .poll(wgpu::PollType::wait_indefinitely())
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(Duration::from_secs(30)),
+            })
             .context("GPU polling failed")?;
         for receiver in receivers {
             receiver
-                .recv()
+                .recv_timeout(Duration::from_secs(5))
                 .context("GPU readback callback was dropped")?
                 .context("GPU readback mapping failed")?;
         }
         if let Some(receiver) = timestamp_receiver {
             receiver
-                .recv()
+                .recv_timeout(Duration::from_secs(5))
                 .context("GPU timestamp callback was dropped")?
                 .context("GPU timestamp mapping failed")?;
         }
@@ -1567,6 +1635,9 @@ impl Renderer for WgpuRenderer {
             }
             drop(mapped);
             resource.readback.unmap();
+            if background[3] < 1.0 {
+                straight_alpha_png(&mut rgba);
+            }
             images.push(RenderedImage {
                 view: resource.id.clone(),
                 width,
@@ -1999,7 +2070,9 @@ fn create_color_texture(
         dimension: wgpu::TextureDimension::D2,
         format: COLOR_FORMAT,
         usage: if sample_count == 1 {
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING
         } else {
             wgpu::TextureUsages::RENDER_ATTACHMENT
         },
@@ -2024,11 +2097,55 @@ fn create_depth_texture(
         sample_count,
         dimension: wgpu::TextureDimension::D2,
         format: DEPTH_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     })
 }
 
 fn align_to(value: u32, alignment: u32) -> u32 {
     value.div_ceil(alignment) * alignment
+}
+
+// Render-target blending/MSAA resolves associate linear RGB with coverage.
+// PNG and WIC expect unassociated sRGB, so remove that association once after
+// GPU effects/readback, rather than darkening translucent edge pixels twice.
+fn straight_alpha_png(rgba: &mut [u8]) {
+    for pixel in rgba.chunks_exact_mut(4) {
+        let alpha = f32::from(pixel[3]) / 255.0;
+        if pixel[3] == 0 {
+            pixel[..3].fill(0);
+            continue;
+        }
+        if pixel[3] == 255 {
+            continue;
+        }
+        for channel in &mut pixel[..3] {
+            let encoded = f32::from(*channel) / 255.0;
+            let linear = if encoded <= 0.04045 {
+                encoded / 12.92
+            } else {
+                ((encoded + 0.055) / 1.055).powf(2.4)
+            };
+            let straight = (linear / alpha).clamp(0.0, 1.0);
+            let encoded = if straight <= 0.0031308 {
+                straight * 12.92
+            } else {
+                1.055 * straight.powf(1.0 / 2.4) - 0.055
+            };
+            *channel = (encoded * 255.0).round() as u8;
+        }
+    }
+}
+
+#[cfg(test)]
+mod alpha_tests {
+    #[test]
+    fn coverage_is_removed_in_linear_space_and_alpha_is_preserved() {
+        let mut pixels = [137, 0, 0, 128, 99, 33, 11, 0, 12, 22, 33, 255];
+        super::straight_alpha_png(&mut pixels);
+        assert!((i32::from(pixels[0]) - 188).abs() <= 1);
+        assert_eq!(&pixels[1..4], &[0, 0, 128]);
+        assert_eq!(&pixels[4..8], &[0, 0, 0, 0]);
+        assert_eq!(&pixels[8..], &[12, 22, 33, 255]);
+    }
 }
