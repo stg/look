@@ -11,28 +11,28 @@ use crate::{
 };
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable, Serialize, Deserialize)]
 pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable, Serialize, Deserialize)]
 pub struct SourceVertexAttributes {
     pub tex_coord_0: [f32; 2],
     pub tex_coord_1: [f32; 2],
     pub color: [f32; 4],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TextureWrap {
     ClampToEdge,
     MirroredRepeat,
     Repeat,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TextureSampler {
     pub mag_linear: bool,
     pub min_linear: bool,
@@ -41,34 +41,34 @@ pub struct TextureSampler {
     pub wrap_v: TextureWrap,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceTexture {
     pub encoded: Vec<u8>,
     pub sampler: TextureSampler,
     pub decoded: Option<DecodedTexture>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecodedTexture {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TextureReference {
     pub texture: usize,
     pub tex_coord: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AlphaMode {
     Opaque,
     Mask,
     Blend,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceMaterial {
     pub name: Option<String>,
     pub base_color_factor: [f32; 4],
@@ -88,7 +88,7 @@ pub struct SourceMaterial {
     pub double_sided: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Geometry {
     pub vertices: Vec<Vertex>,
     pub source_attributes: Option<Vec<SourceVertexAttributes>>,
@@ -98,7 +98,7 @@ pub struct Geometry {
     pub bounding_radius: f32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Instance {
     pub geometry: usize,
     pub material: usize,
@@ -107,7 +107,7 @@ pub struct Instance {
     pub node_name: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompiledScene {
     pub source_hash: String,
     pub geometries: Vec<Geometry>,

@@ -20,3 +20,6 @@ root harness artifacts (worker slot artifacts must never be tracked)
 
 # machine-local agent guidance
 /AGENTS.local.md
+
+# Private original models, cache images, and machine-specific metadata
+/failures/private/
