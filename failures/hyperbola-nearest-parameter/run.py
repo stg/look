@@ -9,6 +9,8 @@ import sys
 import tempfile
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+from support import record
 CASES = [("case-a.stepdata", "21027"), ("case-b.stepdata", "21705")]
 
 
@@ -40,6 +42,8 @@ def main():
                         help="hard timeout per case in seconds (maximum 10; default 2)")
     parser.add_argument("--static-crt", action="store_true",
                         help="match an rlib built for MSVC with +crt-static")
+    parser.add_argument("--expect-timeout", action="store_true",
+                        help="succeed only when both resolved edges exceed the deadline")
     args = parser.parse_args()
     if not 0 < args.timeout <= 10:
         parser.error("--timeout must be greater than zero and at most 10 seconds")
@@ -72,11 +76,17 @@ def main():
         for filename, edge in CASES:
             print(f"\n{filename} (edge #{edge}):", flush=True)
             code, out, err, timed_out = run_child([str(executable), str(HERE / filename), edge], args.timeout)
+            record("hang-" + Path(filename).stem, out + err)
             if out:
                 print(out, end="")
             if err:
                 print(err, end="", file=sys.stderr)
-            if timed_out:
+            if args.expect_timeout:
+                reproduced = timed_out and f"Resolved edge #{edge};" in out
+                failures += not reproduced
+                print("REPRODUCED: conversion timed out after resolving the edge" if reproduced
+                      else "UNEXPECTED: timeout observation changed")
+            elif timed_out:
                 failures += 1
                 print(f"FAIL: exceeded {args.timeout:g} seconds; child was killed and reaped")
             elif code:

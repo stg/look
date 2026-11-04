@@ -1,28 +1,74 @@
-"""Verify reduced actual-face conversion and meshing losses with a bounded importer."""
-import argparse,json,os,pathlib,shutil,subprocess,sys,tempfile
-p=argparse.ArgumentParser(description=__doc__);group=p.add_mutually_exclusive_group(required=True);group.add_argument('--exe',type=pathlib.Path);group.add_argument('--look-exe',type=pathlib.Path);p.add_argument('--timeout',type=float,default=5);a=p.parse_args()
-if not 0<a.timeout<=10:p.error('timeout must be in (0,10]')
-exe=(a.look_exe or a.exe).resolve(strict=True);root=pathlib.Path(__file__).resolve().parent;base=pathlib.Path(os.environ['LOCALAPPDATA'])/'StepThumbnail/private-probes';base.mkdir(parents=True,exist_ok=True);failed=False
-for n,face,suffix in [(1,811,''),(2,320,''),(2,119,'-parity'),(4,17,''),(5,560,''),(6,14018,''),(6,7209,'-plane'),(7,559,'')]:
- with tempfile.TemporaryDirectory(prefix='look-lost-face-',dir=base) as d:
-  src=pathlib.Path(d)/'case.step';shutil.copyfile(root/(f'case-{n:02d}' + suffix + '.stepdata'),src);request=json.dumps({'path':str(src),'colours':True,'seconds':4})+'\n'
-  try:
-   child=subprocess.run([str(exe),'inspect',str(src),'--up-axis','z','--json'] if a.look_exe else [str(exe),'--import-worker','1'],input=None if a.look_exe else request.encode(),stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=a.timeout)
-  except subprocess.TimeoutExpired:print(f'case-{n:02d}: TIMEOUT');failed=True;continue
-  log=child.stderr.decode('utf8',errors='replace');records=[]
-  for line in log.splitlines():
-   if line.startswith('{'):
-    try:records.append(json.loads(line))
-    except json.JSONDecodeError:pass
-  matched=any(r.get('source_face_id')==face and ((r.get('terminal_reason')=='ContradictoryDualParity') if suffix=='-parity' else (r.get('refusal_tag')=='EdgeCurveConversionFailed' and r.get('declared_shell_faces')==2 and r.get('surviving_shell_faces')==1)) for r in records)
-  ok=child.returncode==0 and matched and 'warning: 1 of 2 STEP faces' in log
-  print(f'case-{n:02d}'+suffix+':', 'verified: source face refused; one of two faces lost' if ok else 'unexpected result',flush=True);failed |= not ok
-for n in [6,7]:
- with tempfile.TemporaryDirectory(prefix='look-loss-control-',dir=base) as d:
-  src=pathlib.Path(d)/'case.step';shutil.copyfile(root/f'case-{n:02d}-control.stepdata',src);request=json.dumps({'path':str(src),'colours':True,'seconds':4})+'\n'
-  try:
-   child=subprocess.run([str(exe),'inspect',str(src),'--up-axis','z','--json'] if a.look_exe else [str(exe),'--import-worker','1'],input=None if a.look_exe else request.encode(),stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=a.timeout)
-  except subprocess.TimeoutExpired:print(f'case-{n:02d}-control: TIMEOUT');failed=True;continue
-  log=child.stderr.decode('utf8',errors='replace');ok=child.returncode==0 and 'warning:' not in log and 'EdgeCurveConversionFailed' not in log
-  print(f'case-{n:02d}-control:', 'verified: neither face was refused' if ok else 'unexpected result',flush=True);failed |= not ok
-sys.exit(1 if failed else 0)
+"""Check the documented source-face losses and endpoint-projected controls."""
+import argparse
+import json
+from pathlib import Path
+import re
+import shutil
+import sys
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[1]))
+from support import record, run, temporary
+
+CASES = [
+    ("01", 811, 2, "EdgeCurveConversionFailed"),
+    ("02", 320, 2, "EdgeCurveConversionFailed"),
+    ("02-parity", 119, 2, "ContradictoryDualParity"),
+    ("04", 17, 2, "EdgeCurveConversionFailed"),
+    ("05", 560, 2, "EdgeCurveConversionFailed"),
+    ("06", 14018, 2, "EdgeCurveConversionFailed"),
+    ("06-plane", 7209, 2, "EdgeCurveConversionFailed"),
+    ("06-clarified", 7209, 1, "EdgeCurveConversionFailed"),
+    ("07", 559, 2, "EdgeCurveConversionFailed"),
+]
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--look-exe", type=Path, required=True)
+    parser.add_argument("--timeout", type=float, default=5)
+    args = parser.parse_args()
+    if not 0 < args.timeout <= 10:
+        parser.error("timeout must be in (0, 10]")
+    executable = args.look_exe.resolve(strict=True)
+    failed = False
+    cases = CASES + [("06-control", None, 2, None), ("07-control", None, 2, None)]
+    for name, face, count, reason in cases:
+        fixture = HERE / ("case-" + name + ".stepdata")
+        if name == "06-clarified":
+            text = fixture.read_text(encoding="ascii")
+            assert "CONVERSION_BASED_UNIT('INCH'" in text
+            assert "GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT" in text
+            assert re.search(r"UNCERTAINTY_MEASURE_WITH_UNIT\s*\(\s*LENGTH_MEASURE\s*\(\s*1\.E-3\s*\)", text)
+        with temporary("look-face-loss-") as directory:
+            source = Path(directory) / "case.step"
+            shutil.copyfile(fixture, source)
+            code, log, timed_out = run([executable, "inspect", source, "--up-axis", "z", "--json"], args.timeout)
+        record("loss-" + name, log)
+        records = []
+        for line in log.splitlines():
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+        if face is None:
+            ok = code == 0 and "warning:" not in log and "EdgeCurveConversionFailed" not in log
+            finding = "both control faces survive"
+        else:
+            field = "terminal_reason" if reason == "ContradictoryDualParity" else "refusal_tag"
+            matched = any(isinstance(r, dict) and r.get("source_face_id") == face and r.get(field) == reason
+                          for r in records)
+            if reason == "EdgeCurveConversionFailed":
+                matched &= any(isinstance(r, dict) and r.get("source_face_id") == face
+                               and r.get("declared_shell_faces") == count
+                               and r.get("surviving_shell_faces") == count - 1 for r in records)
+            ok = matched and (code != 0 if count == 1 else code == 0 and "warning: 1 of 2 STEP faces" in log)
+            finding = f"face #{face}: {reason}; {count - 1}/{count} faces survive"
+        ok = ok and not timed_out
+        print("case-" + name, finding if ok else "UNEXPECTED (see log)", flush=True)
+        failed |= not ok
+    return int(failed)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
