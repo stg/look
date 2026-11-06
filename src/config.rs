@@ -319,7 +319,7 @@ impl NormalizedConfig {
         if !self.render.edge_strength.is_finite()
             || !(0.0..=1.0).contains(&self.render.edge_strength)
             || !self.render.edge_width.is_finite()
-            || !(1.0..=3.0).contains(&self.render.edge_width)
+            || !(0.25..=3.0).contains(&self.render.edge_width)
         {
             bail!("Edge strength must be 0..1 and width 1..3 pixels");
         }

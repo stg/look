@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use crate::{camera::PreparedCamera, config::RenderConfig};
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
@@ -9,49 +10,80 @@ struct Params {
     camera: [f32; 4],
     viewport: [f32; 4],
     effect: [f32; 4],
+    background: [f32; 4],
 }
 pub(super) struct Ssao {
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
 }
 impl Ssao {
-    pub(super) fn new(device: &wgpu::Device, samples: u32) -> Self {
+    pub(super) fn new(device: &wgpu::Device, samples: u32, edges: bool) -> Self {
+        let mut entries = vec![wgpu::BindGroupLayoutEntry {
+            binding: 3,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: samples > 1,
+            },
+            count: None,
+        }];
+        if !edges {
+            entries.clear();
+        }
+        entries.extend_from_slice(&[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: samples > 1,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ]);
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("StepThumbnail SSAO layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: samples > 1,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
+            entries: &entries,
         });
         let source = include_str!("ssao.wgsl")
+            .replace(
+                "EDGE_SHADER",
+                if edges {
+                    include_str!("edges.wgsl")
+                } else {
+                    "fn edge_coverage(pixel: vec2<i32>) -> vec2<f32> { return vec2(0.0,1.0); }"
+                },
+            )
+            .replace(
+                "NORMAL_TYPE",
+                if samples > 1 {
+                    "texture_multisampled_2d<f32>"
+                } else {
+                    "texture_2d<f32>"
+                },
+            )
             .replace(
                 "DEPTH_TYPE",
                 if samples > 1 {
@@ -103,6 +135,7 @@ impl Ssao {
         encoder: &mut wgpu::CommandEncoder,
         source: &wgpu::Texture,
         depth: &wgpu::TextureView,
+        normals: Option<&wgpu::TextureView>,
         cameras: &[PreparedCamera],
         render: &RenderConfig,
         columns: u32,
@@ -154,6 +187,12 @@ impl Ssao {
                         },
                         render.edge_width,
                     ],
+                    background: [
+                        background[0] * background[3],
+                        background[1] * background[3],
+                        background[2] * background[3],
+                        background[3],
+                    ],
                 };
                 device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("SSAO parameters"),
@@ -165,23 +204,30 @@ impl Ssao {
         let groups = uniforms
             .iter()
             .map(|uniform| {
+                let mut entries = vec![
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&colour),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(depth),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: uniform.as_entire_binding(),
+                    },
+                ];
+                if let Some(normals) = normals {
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(normals),
+                    });
+                }
                 device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("SSAO inputs"),
                     layout: &self.layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&colour),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(depth),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: uniform.as_entire_binding(),
-                        },
-                    ],
+                    entries: &entries,
                 })
             })
             .collect::<Vec<_>>();
@@ -226,4 +272,3 @@ impl Ssao {
         target
     }
 }
-// SPDX-License-Identifier: MIT OR Apache-2.0

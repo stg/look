@@ -161,8 +161,9 @@ struct ViewResources {
 }
 
 pub struct WgpuRenderer {
-    ao_single: Option<super::ssao::Ssao>,
-    ao_multisample: Option<super::ssao::Ssao>,
+    normal_pipelines: Vec<(MaterialMode, u32, wgpu::RenderPipeline)>,
+    ao_single: [Option<super::ssao::Ssao>; 2],
+    ao_multisample: [Option<super::ssao::Ssao>; 2],
     device: wgpu::Device,
     queue: wgpu::Queue,
     fingerprint: HardwareFingerprint,
@@ -281,8 +282,9 @@ impl WgpuRenderer {
         timings.record("gpu_layout", pipeline_started.elapsed());
 
         Ok(Self {
-            ao_single: None,
-            ao_multisample: None,
+            normal_pipelines: Vec::new(),
+            ao_single: [None, None],
+            ao_multisample: [None, None],
             device,
             queue,
             fingerprint,
@@ -386,6 +388,84 @@ impl WgpuRenderer {
             }
         }
         timings.record("gpu_pipeline", started.elapsed());
+    }
+
+    fn draw_normals(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        scene: &GpuScene,
+        depth: &wgpu::TextureView,
+        cameras: &[&wgpu::BindGroup],
+        render: &RenderConfig,
+        columns: u32,
+        width: u32,
+        height: u32,
+        samples: u32,
+    ) -> wgpu::Texture {
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("look visible face normal buffer"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: samples,
+            dimension: wgpu::TextureDimension::D2,
+            format: super::normals::FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let pipeline = &self
+            .normal_pipelines
+            .iter()
+            .find(|(mode, count, _)| *mode == render.material_mode && *count == samples)
+            .expect("normal pipeline initialized")
+            .2;
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("look geometric normals for edges"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth,
+                depth_ops: None,
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_vertex_buffer(0, scene.vertex_buffer.slice(..));
+        pass.set_vertex_buffer(1, scene.instance_buffer.slice(..));
+        pass.set_index_buffer(scene.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        for (i, camera) in cameras.iter().enumerate() {
+            let x = i as u32 % columns * render.resolution[0];
+            let y = i as u32 / columns * render.resolution[1];
+            pass.set_viewport(
+                x as f32,
+                y as f32,
+                render.resolution[0] as f32,
+                render.resolution[1] as f32,
+                0.0,
+                1.0,
+            );
+            pass.set_scissor_rect(x, y, render.resolution[0], render.resolution[1]);
+            pass.set_bind_group(0, *camera, &[]);
+            for draw in &scene.draws {
+                pass.draw_indexed(draw.indices.clone(), 0, draw.instances.clone());
+            }
+        }
+        drop(pass);
+        texture
     }
 
     fn upload_scene(
@@ -985,11 +1065,27 @@ impl WgpuRenderer {
                 pass.set_scissor_rect(0, 0, width, height);
             }
         }
+        let normals = render.edges.then(|| {
+            self.draw_normals(
+                &mut encoder,
+                gpu_scene,
+                &depth_view,
+                &bind_groups.iter().collect::<Vec<_>>(),
+                render,
+                columns,
+                width,
+                height,
+                sample_count,
+            )
+        });
+        let normal_view = normals
+            .as_ref()
+            .map(|texture| texture.create_view(&Default::default()));
         let occluded = (render.ambient_occlusion || render.edges).then(|| {
             let effect = if sample_count > 1 {
-                self.ao_multisample.as_ref()
+                self.ao_multisample[usize::from(render.edges)].as_ref()
             } else {
-                self.ao_single.as_ref()
+                self.ao_single[usize::from(render.edges)].as_ref()
             }
             .expect("AO pipeline initialized");
             effect.apply(
@@ -997,6 +1093,7 @@ impl WgpuRenderer {
                 &mut encoder,
                 &output_texture,
                 &depth_view,
+                normal_view.as_ref(),
                 cameras,
                 render,
                 columns,
@@ -1263,13 +1360,40 @@ impl Renderer for WgpuRenderer {
         self.ensure_pipeline(render.material_mode, sample_count, &mut timings);
         if render.ambient_occlusion || render.edges {
             let slot = if sample_count > 1 {
-                &mut self.ao_multisample
+                &mut self.ao_multisample[usize::from(render.edges)]
             } else {
-                &mut self.ao_single
+                &mut self.ao_single[usize::from(render.edges)]
             };
             if slot.is_none() {
-                *slot = Some(super::ssao::Ssao::new(&self.device, sample_count));
+                *slot = Some(super::ssao::Ssao::new(
+                    &self.device,
+                    sample_count,
+                    render.edges,
+                ));
             }
+        }
+        if render.edges
+            && !self
+                .normal_pipelines
+                .iter()
+                .any(|(mode, samples, _)| *mode == render.material_mode && *samples == sample_count)
+        {
+            let stride = if render.material_mode == MaterialMode::Source {
+                mem::size_of::<SourceVertex>()
+            } else {
+                mem::size_of::<Vertex>()
+            } as u64;
+            self.normal_pipelines.push((
+                render.material_mode,
+                sample_count,
+                super::normals::pipeline(
+                    &self.device,
+                    &self.bind_group_layout,
+                    stride,
+                    mem::size_of::<InstanceRaw>() as u64,
+                    sample_count,
+                ),
+            ));
         }
 
         let cache_started = Instant::now();
@@ -1530,11 +1654,27 @@ impl Renderer for WgpuRenderer {
                     }
                 }
             }
+            let normals = render.edges.then(|| {
+                self.draw_normals(
+                    &mut encoder,
+                    &gpu_scene,
+                    &resource.depth_view,
+                    &[&resource.bind_group],
+                    render,
+                    1,
+                    width,
+                    height,
+                    sample_count,
+                )
+            });
+            let normal_view = normals
+                .as_ref()
+                .map(|texture| texture.create_view(&Default::default()));
             let occluded = (render.ambient_occlusion || render.edges).then(|| {
                 let effect = if sample_count > 1 {
-                    self.ao_multisample.as_ref()
+                    self.ao_multisample[usize::from(render.edges)].as_ref()
                 } else {
-                    self.ao_single.as_ref()
+                    self.ao_single[usize::from(render.edges)].as_ref()
                 }
                 .expect("AO pipeline initialized");
                 effect.apply(
@@ -1542,6 +1682,7 @@ impl Renderer for WgpuRenderer {
                     &mut encoder,
                     &resource.output_texture,
                     &resource.depth_view,
+                    normal_view.as_ref(),
                     &cameras[resource_index..resource_index + 1],
                     render,
                     1,

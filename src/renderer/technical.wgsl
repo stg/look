@@ -23,7 +23,7 @@ struct VertexInput {
 };
 
 struct VertexOutput {
-    @builtin(position) clip_position: vec4<f32>,
+    @builtin(position) @invariant clip_position: vec4<f32>,
     @location(0) world_normal: vec3<f32>,
 };
 

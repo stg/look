@@ -1,3 +1,4 @@
+mod normals;
 mod ssao;
 mod wgpu_renderer;
 

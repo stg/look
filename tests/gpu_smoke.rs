@@ -157,6 +157,39 @@ fn effects_preserve_transparent_single_views_and_atlases() {
 }
 
 #[test]
+#[ignore = "requires a native GPU"]
+fn edges_preserve_white_background_with_fractional_widths() {
+    let folder = tempfile::tempdir().unwrap();
+    let model = folder.path().join("triangle.glb");
+    fs::write(&model, triangle_glb()).unwrap();
+    let scene = compile_glb(&model, UpAxis::Y, &mut Timings::default()).unwrap();
+    let mut renderer = WgpuRenderer::new().unwrap();
+    for antialias in [false, true] {
+        for edge_width in [0.5, 1.5] {
+            let render = RenderConfig {
+                resolution: [128, 128],
+                background: "#ffffff".into(),
+                ambient_occlusion: true,
+                edges: true,
+                antialias,
+                edge_width,
+                ..Default::default()
+            };
+            let camera = prepare_camera(
+                &ViewConfig::named(NamedView::Front, CameraKind::Orthographic),
+                &scene.bounds,
+                render.resolution,
+            );
+            let batch = renderer
+                .render_views(&scene, &[camera], &render, &LightingConfig::default())
+                .unwrap();
+            assert!(batch.images[0].rgba.chunks_exact(4).all(|p| p[3] == 255));
+            assert_eq!(&batch.images[0].rgba[..4], &[255, 255, 255, 255]);
+        }
+    }
+}
+
+#[test]
 #[ignore = "requires a native GPU and mutates the process cache environment"]
 fn persisted_server_session_round_trip() {
     let cache = tempfile::tempdir().unwrap();

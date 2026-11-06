@@ -142,11 +142,12 @@ pub struct RenderArgs {
     pub ao_strength: f32,
     #[arg(long, default_value_t = 14.0)]
     pub ao_radius: f32,
-    /// GPU silhouette and crease outlines (StepThumbnail build).
+    /// GPU outlines with a 30 to 60 degree crease fade (StepThumbs build).
     #[arg(long)]
     pub edges: bool,
     #[arg(long, default_value_t = 0.75)]
     pub edge_strength: f32,
+    /// Edge width in pixels; fractional widths are supported (0.25-3).
     #[arg(long, default_value_t = 1.0)]
     pub edge_width: f32,
 
